@@ -24,10 +24,12 @@ class AIResponse:
         self._start_course_extraction()
     
     def to_dict(self):
-        # Convert DataFrames to JSON-serializable format
+        # Convert DataFrames to JSON-serializable format using cleaned data
         course_timetable_serializable = {}
         if self.course_timetable:
-            for course_code, df in self.course_timetable.items():
+            # Use cleaned data to avoid bloated/duplicate records
+            cleaned_data = self.get_clean_course_data()
+            for course_code, df in cleaned_data.items():
                 if df is not None and not df.empty:
                     course_timetable_serializable[course_code] = df.to_dict('records')
                 else:
@@ -46,36 +48,44 @@ class AIResponse:
             "updated_at": self.updated_at.isoformat()
         }
 
-    def from_dict(self, data):
+    @classmethod
+    def from_dict(cls, data):
         from uuid import UUID
+        instance = cls.__new__(cls)
+        
         id_value = data.get('id', None)
         # Handle both string and UUID object cases
         if isinstance(id_value, str):
-            self.id = UUID(id_value)
+            instance.id = UUID(id_value)
         else:
-            self.id = id_value
-        self.courses_requested = data.get('courses_requested', None)
-        self.semester = data.get('semester', None)
-        self.email = data.get('email', None)
-        self.stage = data.get('stage', None)
+            instance.id = id_value
+        instance.courses_requested = data.get('courses_requested', None)
+        instance.semester = data.get('semester', None)
+        instance.email = data.get('email', None)
+        instance.stage = data.get('stage', None)
         
         # Convert serialized course timetable back to DataFrames
         course_timetable_data = data.get('course_timetable', None)
         if course_timetable_data:
-            self.course_timetable = {}
+            instance.course_timetable = {}
             for course_code, records in course_timetable_data.items():
                 if records and len(records) > 0:
-                    self.course_timetable[course_code] = pd.DataFrame(records)
+                    instance.course_timetable[course_code] = pd.DataFrame(records)
                 else:
-                    self.course_timetable[course_code] = pd.DataFrame()
+                    instance.course_timetable[course_code] = pd.DataFrame()
         else:
-            self.course_timetable = None
+            instance.course_timetable = None
             
-        self.ai_response = data.get('ai_response', None)
-        self.preferences = data.get('preferences', None)
-        self.created_at = datetime.fromisoformat(data.get('created_at', datetime.now().isoformat()))
-        self.updated_at = datetime.fromisoformat(data.get('updated_at', datetime.now().isoformat()))
-        return self
+        instance.ai_response = data.get('ai_response', None)
+        instance.preferences = data.get('preferences', None)
+        instance.created_at = datetime.fromisoformat(data.get('created_at', datetime.now().isoformat()))
+        instance.updated_at = datetime.fromisoformat(data.get('updated_at', datetime.now().isoformat()))
+        
+        # Set other instance variables that would normally be set in __init__
+        instance._extraction_thread = None
+        instance._extraction_error = None
+        
+        return instance
     
     def _start_course_extraction(self):
         """Start the course extraction process in a separate thread"""
@@ -113,20 +123,30 @@ class AIResponse:
             print(f"Error during course extraction: {e}")
     
     def _extract_course_details(self, department, coursenumber, term_year):
-        """Extract course details from Virginia Tech's course system"""
+        """Extract course details from Virginia Tech's course system - captures all time slots including labs/recitations"""
         try:
             url = "https://selfservice.banner.vt.edu/ssb/HZSKVTSC.P_ProcRequest"
             form_data = {
                 "CAMPUS": "0",
                 "TERMYEAR": term_year,
                 "CORE_CODE": "AR%",
-                "subj_code": department.upper(),
-                "SCHDTYPE": "%",
+                "SUBJ_CODE": department.upper(),
                 "CRSE_NUMBER": coursenumber,
-                "crn": "",
-                "open_only": "",
-                "disp_comments_in": "N",  # Changed to N to reduce comments
-                "sess_code": "%",
+                "CRSE_TITLE": "",
+                "BEGIN_HH": "0",
+                "BEGIN_MI": "0",
+                "BEGIN_AP": "A",
+                "END_HH": "0",
+                "END_MI": "0",
+                "END_AP": "A",
+                "DAY_CODE": "M",
+                "DAY_CODE": "T",
+                "DAY_CODE": "W",
+                "DAY_CODE": "R",
+                "DAY_CODE": "F",
+                "DAY_CODE": "S",
+                "DAY_CODE": "U",
+                "DETAIL_PTR": "",
                 "BTN_PRESSED": "FIND class sections",
                 "inst_name": ""
             }
@@ -136,107 +156,136 @@ class AIResponse:
             
             html = response.text
             soup = BeautifulSoup(html, 'html.parser')
-            courses_data = []
             
-            rows = soup.find_all('tr')
+            # Find the main data table
+            data_table = soup.find('table', class_='dataentrytable')
+            if not data_table:
+                return pd.DataFrame()
+            
+            # Extract all time slots including additional times
+            sections = []
+            rows = data_table.find_all('tr')
+            
+            current_crn = None
+            current_course_info = {}
+            
             for row in rows:
-                crn_cell = row.find('a', href=lambda x: x and 'CRN=' in x)
-                if not crn_cell:
-                    continue
-                    
                 cells = row.find_all('td')
-                if len(cells) < 12:
+                if len(cells) < 8:
                     continue
+                
+                # Check if this is a main CRN row (has CRN link in first cell)
+                crn_link = cells[0].find('a', href=lambda x: x and 'CRN=' in x)
+                if crn_link:
+                    crn = crn_link.find('b')
+                    if crn and crn.text.strip().isdigit():
+                        current_crn = crn.text.strip()
+                        
+                        # Extract basic course info for this CRN
+                        current_course_info = {
+                            'CRN': current_crn,
+                            'Course': cells[1].text.strip(),
+                            'Title': cells[2].text.strip(),
+                            'Schedule_Type': cells[3].text.strip(),
+                            'Modality': cells[4].text.strip(),
+                            'Credit_Hours': cells[5].text.strip(),
+                            'Instructor': cells[7].text.strip()
+                        }
+                        
+                        # Extract main time slot (cells 8-11)
+                        if len(cells) >= 12:
+                            time_info = {
+                                'Days': cells[8].text.strip(),
+                                'Begin_Time': cells[9].text.strip(),
+                                'End_Time': cells[10].text.strip(),
+                                'Location': self._clean_location_field(cells[11].text.strip())
+                            }
+                            
+                            if time_info['Days'] and time_info['Begin_Time'] and time_info['End_Time']:
+                                section = {**current_course_info, **time_info}
+                                sections.append(section)
+                
+                # Check if this is an additional time row (has "* Additional Times *" in cell 4)
+                elif (current_crn and len(cells) >= 8 and 
+                      cells[4].text.strip() == "* Additional Times *"):
                     
-                crn = crn_cell.find('b').text.strip() if crn_cell.find('b') else ""
-                course_cell = cells[1]
-                course = course_cell.text.strip()
-                title = cells[2].text.strip()
-                schedule_type = cells[3].text.strip()
-                modality = cells[4].text.strip()
-                cr_hrs = cells[5].text.strip()
-                capacity = cells[6].text.strip()
-                instructor = cells[7].text.strip()
-                days = cells[8].text.strip()
-                begin_time = cells[9].text.strip()
-                end_time = cells[10].text.strip()
-                location = cells[11].text.strip()
-                exam_cell = cells[12] if len(cells) > 12 else None
-                exam_code = exam_cell.find('a').text.strip() if exam_cell and exam_cell.find('a') else ""
-                
-                # Skip rows with invalid CRN or malformed data
-                if not crn or not crn.isdigit():
-                    continue
-                
-                # Skip rows that are clearly comments or malformed
-                if any(indicator in str(cells).lower() for indicator in [
-                    'comments for crn', 'each crn is a combined', 'students outside',
-                    'graduate students looking', 'to force/add', 'show all types',
-                    'course number', 'course request number', 'display'
-                ]):
-                    continue
-                
-                # Add the main course entry
-                courses_data.append({
-                    'CRN': crn,
-                    'Course': course,
-                    'Title': title,
-                    'Schedule Type': schedule_type,
-                    'Modality': modality,
-                    'Credit Hours': cr_hrs,
-                    'Capacity': capacity,
-                    'Instructor': instructor,
-                    'Days': days,
-                    'Begin Time': begin_time,
-                    'End Time': end_time,
-                    'Location': location,
-                    'Exam Code': exam_code
-                })
-                
-                # Check for additional times in the same row
-                # Look for patterns like "* Additional Times *" followed by day/time info
-                row_text = row.get_text()
-                if '* Additional Times *' in row_text or '* Additional Time *' in row_text:
-                    # Try to extract additional time information
-                    additional_times = self._extract_additional_times(row_text, crn, course, title, instructor)
-                    courses_data.extend(additional_times)
+                    # Extract additional time information (cells 5-8)
+                    days = cells[5].text.strip() if len(cells) > 5 else ""
+                    begin_time = cells[6].text.strip() if len(cells) > 6 else ""
+                    end_time = cells[7].text.strip() if len(cells) > 7 else ""
+                    location = self._clean_location_field(cells[8].text.strip()) if len(cells) > 8 else ""
+                    
+                    # Only add if we have valid time data
+                    if days and begin_time and end_time:
+                        additional_time_info = {
+                            'Days': days,
+                            'Begin_Time': begin_time,
+                            'End_Time': end_time,
+                            'Location': location
+                        }
+                        
+                        section = {**current_course_info, **additional_time_info}
+                        sections.append(section)
             
-            return pd.DataFrame(courses_data)
+            # Convert to DataFrame and clean
+            if sections:
+                df = pd.DataFrame(sections)
+                # Remove duplicates and clean data
+                df = df.drop_duplicates(subset=['CRN', 'Days', 'Begin_Time', 'End_Time'])
+                df = df.dropna(subset=['CRN', 'Course', 'Title'])
+                return df
+            else:
+                return pd.DataFrame()
             
         except Exception as e:
             print(f"Error extracting course details for {department}{coursenumber}: {str(e)}")
             return None
     
-    def _extract_additional_times(self, row_text, crn, course, title, instructor):
-        """Extract additional times from row text"""
+    def _clean_location_field(self, location):
+        """Clean location field by removing extra data and formatting"""
+        if not location:
+            return ""
+        
+        # Remove newlines and extra whitespace
+        location = location.replace('\n', ' ').replace('\r', ' ')
+        
+        # Remove extra data that gets mixed in (like CRN numbers and department codes)
         import re
         
-        additional_times = []
+        # Remove patterns like "13378 CS" or similar number-letter combinations
+        location = re.sub(r'\s+\d+\s+[A-Z]+\s*$', '', location)
+        location = re.sub(r'\s+\d+\s*$', '', location)
         
-        # Look for patterns like "* Additional Times *" followed by day/time info
-        # Pattern: * Additional Times * followed by day, time, location
-        pattern = r'\* Additional Times?\s*\*\s*([A-Z])\s+(\d{1,2}:\d{2}[AP]M)\s+(\d{1,2}:\d{2}[AP]M)\s+([A-Z0-9\s]+)'
-        matches = re.findall(pattern, row_text)
+        # Clean up multiple spaces
+        location = re.sub(r'\s+', ' ', location)
         
-        for match in matches:
-            day, start_time, end_time, location = match
-            additional_times.append({
-                'CRN': crn,
-                'Course': course,
-                'Title': title,
-                'Schedule Type': 'Lab',  # Additional times are usually labs
-                'Modality': 'Face-to-Face Instruction',
-                'Credit Hours': '',
-                'Capacity': '',
-                'Instructor': instructor,
-                'Days': day.strip(),
-                'Begin Time': start_time.strip(),
-                'End Time': end_time.strip(),
-                'Location': location.strip(),
-                'Exam Code': ''
-            })
+        return location.strip()
+    
+    def get_clean_course_data(self):
+        """Get cleaned course data with proper deduplication"""
+        if not self.course_timetable:
+            return {}
         
-        return additional_times
+        cleaned_data = {}
+        for course_code, df in self.course_timetable.items():
+            if df is not None and not df.empty:
+                # Remove duplicates based on CRN, Days, Begin_Time, End_Time (using underscore format)
+                df_cleaned = df.drop_duplicates(subset=['CRN', 'Days', 'Begin_Time', 'End_Time'])
+                
+                # Clean location fields
+                if 'Location' in df_cleaned.columns:
+                    df_cleaned['Location'] = df_cleaned['Location'].apply(self._clean_location_field)
+                
+                # Remove rows with empty essential fields
+                df_cleaned = df_cleaned.dropna(subset=['CRN', 'Course', 'Title', 'Schedule_Type'])
+                df_cleaned = df_cleaned[df_cleaned['CRN'].str.strip() != '']
+                df_cleaned = df_cleaned[df_cleaned['Course'].str.strip() != '']
+                df_cleaned = df_cleaned[df_cleaned['Title'].str.strip() != '']
+                
+                cleaned_data[course_code] = df_cleaned
+        
+        return cleaned_data
+    
     
     def get_course_timetable(self):
         """Get the course timetable data (returns None if extraction is still in progress)"""

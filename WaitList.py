@@ -50,8 +50,7 @@ class WaitList:
                     return response.ai_response
                 else:
                     return "processing"
-            else:
-                return "not found"
+        return "not found"
     
     def get_waitlist(self):
         return self.waitlist

@@ -213,25 +213,16 @@ class AIProcessorThread:
                 number = course.get('number', '')
                 prompt_parts.append(f"- {department}{number}")
             
-            # Add available course sections
+            # Add available course sections - use raw data without processing
             if response.course_timetable:
                 prompt_parts.append("\nAvailable Course Sections:")
+                
+                # Use the raw course timetable data directly
                 for course_code, course_data in response.course_timetable.items():
-                    if not course_data.empty:
+                    if course_data is not None and not course_data.empty:
                         prompt_parts.append(f"\n{course_code}:")
-                        # Filter out comment-heavy or malformed rows
-                        cleaned_data = self._clean_course_data(course_data)
-                        for _, section in cleaned_data.iterrows():
-                            prompt_parts.append(
-                                f"  CRN: {section['CRN']}, "
-                                f"Course: {section['Course']}, "
-                                f"Title: {section['Title']}, "
-                                f"Type: {section['Schedule Type']}, "
-                                f"Instructor: {section['Instructor']}, "
-                                f"Days: {section['Days']}, "
-                                f"Time: {section['Begin Time']} - {section['End Time']}, "
-                                f"Location: {section['Location']}"
-                            )
+                        # Just dump the raw data as CSV
+                        prompt_parts.append(course_data.to_csv(index=False))
             
             # Add preferences
             if response.preferences:
@@ -249,6 +240,7 @@ class AIProcessorThread:
             print(f"Error building AI prompt: {e}")
             return "Generate a schedule for the requested courses."
     
+
     def _clean_course_data(self, course_data):
         """Clean course data by removing comment-heavy and malformed rows"""
         import pandas as pd
@@ -267,6 +259,7 @@ class AIProcessorThread:
             course = str(row.get('Course', '')).strip()
             title = str(row.get('Title', '')).strip()
             schedule_type = str(row.get('Schedule Type', '')).strip()
+            modality = str(row.get('Modality', '')).strip()
             instructor = str(row.get('Instructor', '')).strip()
             days = str(row.get('Days', '')).strip()
             begin_time = str(row.get('Begin Time', '')).strip()
@@ -278,10 +271,10 @@ class AIProcessorThread:
             if exam_code and exam_code != '':
                 return False
             
-            # Check if this is an "* Additional Times *" entry - these should be preserved
-            if ('* Additional Times *' in title or '* Additional Time *' in title or
-                '* Additional Times *' in schedule_type or '* Additional Time *' in schedule_type):
-                return True
+            # Skip malformed "* Additional Times *" entries
+            if (modality == '* Additional Times *' and 
+                (not course or not title or not schedule_type)):
+                return False
             
             # Skip rows that are clearly malformed or contain comments
             comment_indicators = [
