@@ -12,7 +12,7 @@ import {
 } from "@heroicons/react/24/outline";
 
 const API_HOST =
-  process.env.REACT_APP_API_HOST || "https://unischeduler.onrender.com";
+  process.env.REACT_APP_API_HOST || "http://localhost:8000";
 
 const SchedulerPage = () => {
   const navigate = useNavigate();
@@ -248,7 +248,7 @@ const SchedulerPage = () => {
       console.log("SchedulerPage API_HOST:", API_HOST);
       console.log(
         "Making fetch request to:",
-        `${API_HOST}/api/generate_schedule`
+        `${API_HOST}/api/submit_request`
       );
       console.log("Request data:", {
         courses: parsedCourses,
@@ -257,7 +257,7 @@ const SchedulerPage = () => {
         email: preferences.email || undefined,
       });
 
-      const response = await fetch(`${API_HOST}/api/generate_schedule`, {
+      const response = await fetch(`${API_HOST}/api/submit_request`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -284,39 +284,24 @@ const SchedulerPage = () => {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || "Failed to generate schedule");
+        if (data.cooldown_mode) {
+          toast.error(
+            "Service is currently in cooldown mode. Please try again later.",
+            { id: "schedule" }
+          );
+          setError("Service is currently in cooldown mode. Please try again later.");
+          return;
+        }
+        throw new Error(data.error || "Failed to submit request");
       }
 
-      if (data === "NO_VALID_SCHEDULE_FOUND") {
-        toast.error(
-          "No valid schedule found. Please try different courses or preferences.",
-          { id: "schedule" }
-        );
-        setError(
-          "No valid schedule found. Please try different courses or preferences."
-        );
-        return;
-      }
-
-      toast.success("Schedule generated successfully!", {
+      toast.success("Request submitted successfully! Redirecting to status page...", {
         id: "schedule",
-        duration: 3000, // Auto-dismiss after 3 seconds
+        duration: 3000,
       });
 
-      // Save schedule and navigate to viewer
-      const scheduleWithId = {
-        ...data,
-        courses,
-        preferences: preferences.schedulePreferences,
-        semester: semesterOptions.find(
-          (opt) => opt.termYear === selectedSemester
-        )?.display,
-        email: preferences.email,
-      };
-
-      saveSchedule(scheduleWithId);
-      setCurrentSchedule(scheduleWithId);
-      navigate(`/schedule/${scheduleWithId.id}`);
+      // Navigate to status page
+      navigate(`/schedule/${data.request_id}`);
     } catch (error) {
       console.error("Error generating schedule:", error);
       console.error("Error details:", {

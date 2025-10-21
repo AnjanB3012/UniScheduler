@@ -3,8 +3,8 @@ flask-cors
 beautifulsoup4
 requests
 pandas
-google-generativeai
 python-dotenv
 reportlab
 matplotlib
 gunicorn
+google-genai

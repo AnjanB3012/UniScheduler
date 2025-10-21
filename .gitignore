@@ -141,3 +141,6 @@ __pycache__/
 server_logs.json
 token_total.json
 security_config.json
+ai_config*.json
+server_data/
+test*

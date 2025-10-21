@@ -1,66 +1,89 @@
 import React, { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { useSchedule } from "../context/ScheduleContext";
 import {
   ArrowLeftIcon,
   CalendarIcon,
   TableCellsIcon,
   ArrowDownTrayIcon,
-  TrashIcon,
   ClockIcon,
-  MapPinIcon,
-  UserIcon,
+  CheckCircleIcon,
+  ExclamationCircleIcon,
+  XCircleIcon,
 } from "@heroicons/react/24/outline";
 import CalendarView from "../components/CalendarView";
 import toast from "react-hot-toast";
 
 const API_HOST =
-  process.env.REACT_APP_API_HOST || "https://unischeduler.onrender.com";
+  process.env.REACT_APP_API_HOST || "http://localhost:8000";
 
 const ScheduleViewerPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { savedSchedules, deleteSchedule, currentSchedule } = useSchedule();
+  const [scheduleData, setScheduleData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [viewMode, setViewMode] = useState("calendar");
-  const [schedule, setSchedule] = useState(null);
   const [crnColors, setCrnColors] = useState({});
+  const [progress, setProgress] = useState(null);
+  const [timeline, setTimeline] = useState([]);
+  const [cooldownMode, setCooldownMode] = useState(false);
 
   useEffect(() => {
-    // Find schedule by ID
-    const foundSchedule =
-      savedSchedules.find((s) => s.id === id) || currentSchedule;
-    if (foundSchedule) {
-      setSchedule(foundSchedule);
-      generateColors(foundSchedule);
-    } else {
-      toast.error("Schedule not found");
-      navigate("/scheduler");
+    if (id) {
+      checkScheduleStatus();
+      // Set up polling for status updates
+      const interval = setInterval(checkScheduleStatus, 3000);
+      return () => clearInterval(interval);
     }
-  }, [id, savedSchedules, currentSchedule, navigate]);
+  }, [id]);
 
-  const generateColors = (scheduleData) => {
-    if (!scheduleData || !scheduleData.classes) return;
+  const checkScheduleStatus = async () => {
+    try {
+      const response = await fetch(`${API_HOST}/api/schedule/${id}`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          setError("Schedule not found");
+          setLoading(false);
+          return;
+        }
+        throw new Error(data.error || "Failed to fetch schedule status");
+      }
+
+      setScheduleData(data);
+      setProgress(data.progress);
+      setTimeline(data.timeline || []);
+      setCooldownMode(data.cooldown_mode || false);
+
+      // If processing is complete, stop polling
+      if (data.status === "done_processing" || data.status === "ai_failed" || data.status === "extraction_failed") {
+        setLoading(false);
+        if (data.schedule && data.schedule.classes) {
+          generateColors(data.schedule);
+        }
+      } else {
+        setLoading(true);
+      }
+
+    } catch (error) {
+      console.error("Error checking schedule status:", error);
+      setError("Failed to check schedule status");
+      setLoading(false);
+    }
+  };
+
+  const generateColors = (schedule) => {
+    if (!schedule || !schedule.classes) return;
 
     const colors = [
-      "#FECACA",
-      "#BFDBFE",
-      "#BBF7D0",
-      "#FEF08A",
-      "#E9D5FF",
-      "#FBCFE8",
-      "#C7D2FE",
-      "#99F6E4",
-      "#FED7AA",
-      "#A5F3FC",
-      "#D9F99D",
-      "#FDE68A",
-      "#A7F3D0",
-      "#DDD6FE",
-      "#F5D0FE",
+      "#FECACA", "#BFDBFE", "#BBF7D0", "#FEF08A", "#E9D5FF",
+      "#FBCFE8", "#C7D2FE", "#99F6E4", "#FED7AA", "#A5F3FC",
+      "#D9F99D", "#FDE68A", "#A7F3D0", "#DDD6FE", "#F5D0FE",
     ];
 
     const crnColorMap = {};
-    scheduleData.classes.forEach((cls, index) => {
+    schedule.classes.forEach((cls, index) => {
       if (!crnColorMap[cls.crn]) {
         crnColorMap[cls.crn] = colors[index % colors.length];
       }
@@ -73,7 +96,7 @@ const ScheduleViewerPage = () => {
     try {
       toast.loading("Preparing download...", { id: "download" });
 
-      if (!schedule || !schedule.classes || schedule.classes.length === 0) {
+      if (!scheduleData || !scheduleData.schedule || !scheduleData.schedule.classes || scheduleData.schedule.classes.length === 0) {
         toast.error("No schedule data to download", { id: "download" });
         return;
       }
@@ -88,13 +111,12 @@ const ScheduleViewerPage = () => {
         colorMapping[crn] = [r, g, b];
       });
 
-      const response = await fetch(`${API_HOST}/api/downloadSchedule`, {
+      const response = await fetch(`${API_HOST}/api/download_schedule/${id}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          schedule,
           crnColors: colorMapping,
         }),
       });
@@ -107,7 +129,7 @@ const ScheduleViewerPage = () => {
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `schedule-${schedule.semester || "fallback"}.pdf`;
+      link.download = `schedule-${id}.pdf`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -120,26 +142,144 @@ const ScheduleViewerPage = () => {
     }
   };
 
-  const handleDelete = () => {
-    if (window.confirm("Are you sure you want to delete this schedule?")) {
-      deleteSchedule(id);
-      toast.success("Schedule deleted");
-      navigate("/scheduler");
+  const getStatusIcon = (status) => {
+    switch (status) {
+      case "done_processing":
+        return <CheckCircleIcon className="h-6 w-6 text-green-500" />;
+      case "ai_failed":
+      case "extraction_failed":
+        return <XCircleIcon className="h-6 w-6 text-red-500" />;
+      default:
+        return <ClockIcon className="h-6 w-6 text-blue-500 animate-spin" />;
     }
   };
 
-  if (!schedule) {
+  const getStatusColor = (status) => {
+    switch (status) {
+      case "done_processing":
+        return "text-green-600 bg-green-50 border-green-200";
+      case "ai_failed":
+      case "extraction_failed":
+        return "text-red-600 bg-red-50 border-red-200";
+      default:
+        return "text-blue-600 bg-blue-50 border-blue-200";
+    }
+  };
+
+  if (error) {
     return (
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#861F41] mx-auto mb-4"></div>
-          <p className="text-gray-600 dark:text-gray-400">
-            Loading schedule...
-          </p>
+          <XCircleIcon className="h-16 w-16 text-red-500 mx-auto mb-4" />
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">
+            Error
+          </h2>
+          <p className="text-gray-600 dark:text-gray-400 mb-6">{error}</p>
+          <button
+            onClick={() => navigate("/scheduler")}
+            className="inline-flex items-center px-4 py-2 bg-[#861F41] hover:bg-[#6B1934] text-white font-medium rounded-lg transition-colors"
+          >
+            <ArrowLeftIcon className="h-4 w-4 mr-2" />
+            Back to Scheduler
+          </button>
         </div>
       </div>
     );
   }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 py-8">
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+          {/* Header */}
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6 mb-8">
+            <div className="flex items-center mb-4">
+              <button
+                onClick={() => navigate("/scheduler")}
+                className="mr-4 p-2 text-gray-600 dark:text-gray-400 hover:text-[#861F41] dark:hover:text-[#E5751F] hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+              >
+                <ArrowLeftIcon className="h-5 w-5" />
+              </button>
+              <div>
+                <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
+                  Schedule Status
+                </h1>
+                <p className="text-gray-600 dark:text-gray-400">
+                  Request ID: {id}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Progress Section */}
+          {progress && (
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6 mb-8">
+              <div className="flex items-center mb-4">
+                {getStatusIcon(scheduleData?.status)}
+                <h2 className="text-lg font-semibold text-gray-900 dark:text-white ml-3">
+                  {progress.stage}
+                </h2>
+              </div>
+              
+              <div className="mb-4">
+                <div className="flex justify-between text-sm text-gray-600 dark:text-gray-400 mb-2">
+                  <span>{progress.message}</span>
+                  <span>{progress.percentage}%</span>
+                </div>
+                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                  <div
+                    className="bg-[#861F41] dark:bg-[#E5751F] h-2 rounded-full transition-all duration-500"
+                    style={{ width: `${progress.percentage}%` }}
+                  ></div>
+                </div>
+              </div>
+
+              {cooldownMode && (
+                <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4">
+                  <div className="flex items-center">
+                    <ExclamationCircleIcon className="h-5 w-5 text-yellow-600 dark:text-yellow-400 mr-2" />
+                    <p className="text-yellow-800 dark:text-yellow-200 text-sm">
+                      Service is currently in cooldown mode. Your request will be processed when the service becomes available.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Timeline Section */}
+          {timeline.length > 0 && (
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+                Timeline
+              </h3>
+              <div className="space-y-4">
+                {timeline.map((event, index) => (
+                  <div key={index} className="flex items-start">
+                    <div className="flex-shrink-0 w-3 h-3 bg-[#861F41] dark:bg-[#E5751F] rounded-full mt-1.5"></div>
+                    <div className="ml-4">
+                      <p className="text-sm font-medium text-gray-900 dark:text-white">
+                        {event.event}
+                      </p>
+                      <p className="text-sm text-gray-600 dark:text-gray-400">
+                        {event.description}
+                      </p>
+                      <p className="text-xs text-gray-500 dark:text-gray-500">
+                        {new Date(event.time).toLocaleString()}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Schedule is ready
+  const schedule = scheduleData?.schedule;
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 py-8">
@@ -158,11 +298,9 @@ const ScheduleViewerPage = () => {
                 <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
                   Your Schedule
                 </h1>
-                {schedule.semester && (
-                  <p className="text-gray-600 dark:text-gray-400">
-                    {schedule.semester}
-                  </p>
-                )}
+                <p className="text-gray-600 dark:text-gray-400">
+                  Request ID: {id}
+                </p>
               </div>
             </div>
 
@@ -173,13 +311,6 @@ const ScheduleViewerPage = () => {
               >
                 <ArrowDownTrayIcon className="h-4 w-4 mr-2" />
                 Download PDF
-              </button>
-              <button
-                onClick={handleDelete}
-                className="inline-flex items-center px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg transition-colors"
-              >
-                <TrashIcon className="h-4 w-4 mr-2" />
-                Delete
               </button>
             </div>
           </div>
@@ -216,7 +347,7 @@ const ScheduleViewerPage = () => {
         {/* Schedule Content */}
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
           {/* Check if schedule is empty or has no classes */}
-          {!schedule.classes || schedule.classes.length === 0 ? (
+          {!schedule || !schedule.classes || schedule.classes.length === 0 ? (
             <div className="text-center py-12">
               <div className="mx-auto w-16 h-16 bg-gray-100 dark:bg-gray-700 rounded-full flex items-center justify-center mb-4">
                 <CalendarIcon className="h-8 w-8 text-gray-400" />
@@ -303,20 +434,17 @@ const ScheduleViewerPage = () => {
                             </div>
                           </td>
                           <td className="border border-gray-300 dark:border-gray-600 p-3">
-                            <div className="flex items-center text-gray-700 dark:text-gray-300">
-                              <UserIcon className="h-4 w-4 mr-2 text-gray-500" />
+                            <div className="text-gray-700 dark:text-gray-300">
                               {cls.professorName}
                             </div>
                           </td>
                           <td className="border border-gray-300 dark:border-gray-600 p-3">
-                            <div className="flex items-center text-gray-700 dark:text-gray-300">
-                              <ClockIcon className="h-4 w-4 mr-2 text-gray-500" />
+                            <div className="text-gray-700 dark:text-gray-300">
                               {cls.time} on {cls.days}
                             </div>
                           </td>
                           <td className="border border-gray-300 dark:border-gray-600 p-3">
-                            <div className="flex items-center text-gray-700 dark:text-gray-300">
-                              <MapPinIcon className="h-4 w-4 mr-2 text-gray-500" />
+                            <div className="text-gray-700 dark:text-gray-300">
                               {cls.location}
                             </div>
                           </td>
@@ -324,60 +452,6 @@ const ScheduleViewerPage = () => {
                       ))}
                     </tbody>
                   </table>
-                </div>
-              )}
-
-              {/* Online Courses Section */}
-              {schedule.classes.some((cls) =>
-                cls.location.toLowerCase().includes("online")
-              ) && (
-                <div className="mt-8 p-6 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-                  <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-100 mb-4">
-                    Online Courses
-                  </h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {schedule.classes
-                      .filter((cls) =>
-                        cls.location.toLowerCase().includes("online")
-                      )
-                      .filter(
-                        (cls, index, self) =>
-                          index === self.findIndex((c) => c.crn === cls.crn)
-                      )
-                      .map((cls, index) => (
-                        <div
-                          key={index}
-                          className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-sm border border-blue-100 dark:border-blue-800"
-                        >
-                          <div className="flex items-center justify-between mb-2">
-                            <h4 className="font-semibold text-blue-900 dark:text-blue-100">
-                              {cls.courseNumber}
-                            </h4>
-                            <span className="text-xs text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900 px-2 py-1 rounded-full">
-                              Online
-                            </span>
-                          </div>
-                          <div className="space-y-1 text-sm text-gray-600 dark:text-gray-400">
-                            <div>
-                              <span className="font-medium">Instructor:</span>{" "}
-                              {cls.professorName}
-                            </div>
-                            <div>
-                              <span className="font-medium">Schedule:</span>{" "}
-                              {cls.time} on {cls.days}
-                            </div>
-                            <div>
-                              <span className="font-medium">CRN:</span>{" "}
-                              {cls.crn}
-                            </div>
-                            <div>
-                              <span className="font-medium">Platform:</span>{" "}
-                              {cls.location}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                  </div>
                 </div>
               )}
             </>
